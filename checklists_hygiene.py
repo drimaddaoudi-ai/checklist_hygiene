@@ -290,7 +290,7 @@ def main_app():
 
             rooms_status = st.session_state["current_rooms_status"]
 
-            st.warning("⚠️ Merci de cocher l'état de chaque élément (Oui/Non/Non Applicable).")
+            st.warning("⚠️ Merci de cocher l'état de chaque élément (Oui/Non/N/A).")
 
             # Barre de progression simplifiée
             st.write("Progression :")
@@ -343,7 +343,6 @@ def main_app():
                     for idx, item in enumerate(theoretical_items):
                         st.markdown(f"**{item}**")
                         # Boutons Radio : Oui / Non / N/A
-                        # Index=None oblige l'utilisateur à choisir (pas de valeur par défaut)
                         choice = st.radio(
                             label=f"Choix pour {item}",
                             options=["Oui", "Non", "N/A"],
@@ -361,7 +360,6 @@ def main_app():
                         elif choice == "Non":
                             current_nok.append(item) # Compté comme Non Validé
                         else:
-                            # Si l'utilisateur ne coche rien (None), on le considère comme Manquant/NOK
                             current_nok.append(f"{item} (Non renseigné)")
 
                     # Cas spécial : Si salle et PAS isolement, note auto
@@ -434,9 +432,10 @@ def main_app():
 
             if items_c:
                 df_export = pd.DataFrame(items_c).drop(columns=["id", "timestamp"], errors="ignore")
+                # --- CORRECTION ENCODAGE EXCEL ICI ---
                 st.download_button(
                     "📥 Télécharger (50 derniers)",
-                    df_export.to_csv(index=False).encode("utf-8"),
+                    df_export.to_csv(index=False).encode("utf-8-sig"), # <--- ICI
                     "checklists.csv",
                     "text/csv"
                 )
@@ -480,9 +479,10 @@ def main_app():
             items_j = get_data_with_ids("journal", limit=LIMIT_HISTORY)
             if items_j:
                 df_export_j = pd.DataFrame(items_j).drop(columns=["id", "timestamp"], errors="ignore")
+                # --- CORRECTION ENCODAGE EXCEL ICI ---
                 st.download_button(
                     "📥 Télécharger Journal",
-                    df_export_j.to_csv(index=False).encode("utf-8"),
+                    df_export_j.to_csv(index=False).encode("utf-8-sig"), # <--- ICI
                     "journal.csv",
                     "text/csv"
                 )
