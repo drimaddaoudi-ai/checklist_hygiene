@@ -19,6 +19,20 @@ ADMIN_USER = "admin"
 ROOMS_ENFANT = ["Salle A", "Salle B", "Salle C", "Salle D", "Salle E"]
 ROOMS_FEMME = ["Salle F", "Salle G", "Salle H", "Salle I", "Salle J"]
 
+# --- GESTION DES NOMS D'UTILISATEURS (NOUVEAU) ---
+def get_user_display_name(username):
+    """Convertit l'identifiant technique en nom d'affichage convivial"""
+    mapping = {
+        "vice_major_fadoua": "Mme Fadoua",
+        "vice_major_sanae": "Mme Sanae",
+        "hasnae": "Mme Hasnae",
+        "karima": "Mme Karima",
+        "professeur": "Mme/Mr Professeur",
+        "admin": "Administrateur"
+    }
+    # Retourne le nom mappé ou l'identifiant original si inconnu
+    return mapping.get(username, username)
+
 # --- CHECKLISTS (Contenu Intouché) ---
 CHECKLIST_ITEMS_ROOM = [
     "1. Solutions hydroalcooliques présentes",
@@ -66,16 +80,21 @@ CHECKLIST_ITEMS_LAVABO = [
 def get_db():
     if not firebase_admin._apps:
         try:
+            # 1. Essayer de charger depuis les SECRETS Streamlit (Cloud)
             if "textkey" in st.secrets:
                 key_dict = json.loads(st.secrets["textkey"])
                 cred = credentials.Certificate(key_dict)
                 firebase_admin.initialize_app(cred)
+            
+            # 2. Sinon, essayer de charger le fichier LOCAL (PC)
             else:
                 cred = credentials.Certificate("serviceAccountKey.json")
                 firebase_admin.initialize_app(cred)
+                
         except Exception as e:
             st.error(f"Erreur de connexion Firebase : {e}")
             st.stop()
+            
     return firestore.client()
 
 try:
@@ -92,6 +111,8 @@ def _get_refresh_token(collection_name: str) -> int:
 def _bump_refresh_token(collection_name: str):
     key = f"_refresh_token_{collection_name}"
     st.session_state[key] = st.session_state.get(key, 0) + 1
+
+    # Invalidation cache local de cette collection
     prefix = f"_cache_{collection_name}_"
     keys_to_delete = [k for k in st.session_state.keys() if k.startswith(prefix)]
     for k in keys_to_delete:
@@ -113,6 +134,7 @@ def can_manage_entry(entry_user, entry_timestamp):
     current_user = st.session_state.get("user")
     if current_user == ADMIN_USER:
         return True
+
     if current_user == entry_user and entry_timestamp:
         try:
             # Gestion basique timezone pour éviter crash
@@ -127,6 +149,7 @@ def can_manage_entry(entry_user, entry_timestamp):
 # --- FONCTIONS CRUD ---
 
 def add_checklist_entry(user, type_checklist, service, salle, taches_ok, taches_nok, obs):
+    """Enregistre les tâches faites ET non faites"""
     now_local = datetime.now()
     date_now = now_local.strftime("%Y-%m-%d")
     heure_now = now_local.strftime("%H:%M:%S")
@@ -262,9 +285,13 @@ def login():
 
 # --- APPLICATION ---
 def main_app():
-    # Sidebar
-    st.sidebar.title(f"👤 {st.session_state['user']}")
-    is_admin = (st.session_state["user"] == ADMIN_USER)
+    # Sidebar avec NOM D'AFFICHAGE
+    raw_user = st.session_state['user']
+    display_name = get_user_display_name(raw_user)
+    
+    st.sidebar.title(f"Bonjour ! {display_name}")
+    
+    is_admin = (raw_user == ADMIN_USER)
     
     if is_admin:
         st.sidebar.markdown("BADGE: 🛡️ **Super Admin**")
@@ -404,7 +431,9 @@ def main_app():
         st.subheader("Fil d'actualité")
         items = get_data_with_ids("journal", limit=LIMIT_JOURNAL_FEED)
         for item in items:
-            st.info(f"**{item.get('user')}** ({item.get('date')} {item.get('heure')}):\n\n{item.get('message')}")
+            # Affichage NOM CONVIVIAL
+            display_user = get_user_display_name(item.get('user'))
+            st.info(f"**{display_user}** ({item.get('date')} {item.get('heure')}):\n\n{item.get('message')}")
 
     # --- 3. GESTION & EXPORT ---
     elif menu == "⚙️ Gestion & Historique":
@@ -427,7 +456,6 @@ def main_app():
                         with st.spinner("Récupération des données depuis le Cloud..."):
                             df_admin = export_data_by_date("checklists", d_start, d_end)
                             if not df_admin.empty:
-                                # Nettoyage des colonnes inutiles pour l'export
                                 cols_to_drop = ['timestamp']
                                 df_admin = df_admin.drop(columns=[c for c in cols_to_drop if c in df_admin.columns], errors='ignore')
                                 
@@ -446,7 +474,6 @@ def main_app():
                 st.info("Vous pouvez télécharger les données des dernières 48h.")
                 if st.button("📥 Télécharger (48h)"):
                     with st.spinner("Chargement..."):
-                        # On prend large : aujourd'hui et hier
                         now = datetime.now()
                         start_48 = now - timedelta(days=2)
                         df_user = export_data_by_date("checklists", start_48, now)
@@ -474,7 +501,9 @@ def main_app():
                     c1, c2 = st.columns([4, 1])
                     with c1:
                         salle_info = f" | 📍 {item.get('salle')}" if item.get("salle") else ""
-                        st.markdown(f"**{item.get('date')} - {item.get('heure')}** | 👤 {item.get('user')}")
+                        # Affichage NOM CONVIVIAL
+                        display_user = get_user_display_name(item.get('user'))
+                        st.markdown(f"**{item.get('date')} - {item.get('heure')}** | 👤 {display_user}")
                         st.caption(f"Type : {item.get('poste')} | Secteur : {item.get('service')}{salle_info}")
 
                         if item.get("observation"):
@@ -505,7 +534,6 @@ def main_app():
             st.subheader("Journal de transmission")
             items_j = get_data_with_ids("journal", limit=LIMIT_HISTORY)
             
-            # Bouton simple pour le journal (souvent moins volumineux)
             if items_j:
                 df_j = pd.DataFrame(items_j).drop(columns=["id", "timestamp"], errors="ignore")
                 st.download_button("📥 Télécharger Journal (50 derniers)", df_j.to_csv(index=False).encode("utf-8-sig"), "journal.csv", "text/csv")
@@ -514,7 +542,9 @@ def main_app():
                 with st.container(border=True):
                     c1, c2 = st.columns([4, 1])
                     with c1:
-                        st.markdown(f"**{item.get('date')}** | 👤 {item.get('user')}")
+                        # Affichage NOM CONVIVIAL
+                        display_user = get_user_display_name(item.get('user'))
+                        st.markdown(f"**{item.get('date')}** | 👤 {display_user}")
                         st.info(item.get("message"))
                     with c2:
                         ts = item.get("timestamp")
