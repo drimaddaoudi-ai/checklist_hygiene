@@ -3,7 +3,7 @@ import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime, timedelta, timezone
-import json  # <--- AJOUT NÉCESSAIRE POUR LIRE LES SECRETS
+import json
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Checklist Hygiène", page_icon="🏥", layout="centered")
@@ -61,7 +61,7 @@ CHECKLIST_ITEMS_LAVABO = [
     "Papiers essuie-main disponibles"
 ]
 
-# --- CONNEXION FIREBASE (CORRIGÉE POUR LE CLOUD) ---
+# --- CONNEXION FIREBASE ---
 @st.cache_resource
 def get_db():
     if not firebase_admin._apps:
@@ -156,7 +156,7 @@ def add_checklist_entry(user, type_checklist, service, salle, taches_ok, taches_
         "taches_ok": ", ".join(taches_ok),    # Ce qui est validé (Vert)
         "taches_nok": ", ".join(taches_nok),  # Ce qui n'est pas validé (Rouge)
         "nb_taches": len(taches_ok),
-        "total_items": len(taches_ok) + len(taches_nok),  # Pour calculer le % si besoin
+        "total_items": len(taches_ok) + len(taches_nok),
         "observation": obs,
         "timestamp": firestore.SERVER_TIMESTAMP
     }
@@ -290,7 +290,7 @@ def main_app():
 
             rooms_status = st.session_state["current_rooms_status"]
 
-            st.warning("⚠️ Merci de faire tous les éléments de checklist dans chaque secteur.")
+            st.warning("⚠️ Merci de cocher l'état de chaque élément (Oui/Non/NA).")
 
             # Barre de progression simplifiée
             st.write("Progression :")
@@ -311,7 +311,6 @@ def main_app():
                 st.markdown(f"### 🩺 Contrôle : {salle_active}")
 
                 # --- LOGIQUE DE CALCUL DES ITEMS ---
-                # On détermine quels sont les items théoriques pour cette zone
                 theoretical_items = []
 
                 # 1. Gestion Isolement (Hors Form)
@@ -322,16 +321,10 @@ def main_app():
 
                 # 2. Construction de la liste théorique
                 if salle_active.startswith("Salle"):
-                    theoretical_items = list(CHECKLIST_ITEMS_ROOM)  # Copie
+                    theoretical_items = list(CHECKLIST_ITEMS_ROOM)
                     if isolement_active:
-                        # On ajoute les items d'isolement à la liste théorique
                         iso_items_formatted = [f"[ISOLEMENT] {i}" for i in ISOLEMENT_ITEMS]
                         theoretical_items.extend(iso_items_formatted)
-                    else:
-                        # Si pas d'isolement, on considère que "Pas d'isolement" est l'item théorique
-                        # Mais pour simplifier la logique rouge/vert, on ne l'ajoute pas aux requis,
-                        # on le gère juste comme info.
-                        pass
 
                 elif salle_active == "Hall":
                     theoretical_items = list(CHECKLIST_ITEMS_HALL)
@@ -340,27 +333,45 @@ def main_app():
 
                 # --- FORMULAIRE ---
                 with st.form(f"form_{salle_active}"):
-                    checked_items = []
+                    
+                    # On prépare les listes pour le stockage
+                    current_ok = []
+                    current_nok = []
 
-                    # Affichage des cases à cocher
-                    st.write("Veuillez cocher les éléments **conformes/présents** :")
+                    st.write("**Veuillez renseigner chaque point :**")
 
                     for idx, item in enumerate(theoretical_items):
-                        # clé unique pour éviter collisions d'état inter-zones
-                        if st.checkbox(item, key=f"chk_{salle_active}_{idx}_{item}"):
-                            checked_items.append(item)
+                        st.markdown(f"**{item}**")
+                        # Boutons Radio : Oui / Non / N/A
+                        # Index=None oblige l'utilisateur à choisir (pas de valeur par défaut)
+                        choice = st.radio(
+                            label=f"Choix pour {item}",
+                            options=["Oui", "Non", "N/A"],
+                            horizontal=True,
+                            key=f"rad_{salle_active}_{idx}",
+                            label_visibility="collapsed",
+                            index=None 
+                        )
+                        
+                        # Logique de tri
+                        if choice == "Oui":
+                            current_ok.append(item)
+                        elif choice == "N/A":
+                            current_ok.append(f"{item} (N/A)") # Compté comme Validé
+                        elif choice == "Non":
+                            current_nok.append(item) # Compté comme Non Validé
+                        else:
+                            # Si l'utilisateur ne coche rien (None), on le considère comme Manquant/NOK
+                            current_nok.append(f"{item} (Non renseigné)")
 
-                    # Cas spécial : Si salle et PAS isolement, on ajoute une note auto
+                    # Cas spécial : Si salle et PAS isolement, note auto
                     if salle_active.startswith("Salle") and not isolement_active:
-                        checked_items.append("Pas d'isolement (Non coché)")
+                        current_ok.append("Pas d'isolement (Auto)")
 
                     st.markdown("---")
                     obs_salle = st.text_input("Observation (Optionnel)")
 
                     if st.form_submit_button(f"Valider {salle_active}", type="primary"):
-
-                        # CALCUL DES ITEMS NON COCHÉS (Rouge)
-                        unchecked_items = [i for i in theoretical_items if i not in checked_items]
 
                         # Sauvegarde
                         add_checklist_entry(
@@ -368,8 +379,8 @@ def main_app():
                             type_checklist=type_checklist,
                             service=secteur,
                             salle=salle_active,
-                            taches_ok=checked_items,
-                            taches_nok=unchecked_items,  # Nouvelle donnée envoyée
+                            taches_ok=current_ok,
+                            taches_nok=current_nok,
                             obs=obs_salle
                         )
 
@@ -388,10 +399,8 @@ def main_app():
             # Autres checklists simples
             st.info("Checklist standard")
             with st.form("simple_check"):
-                # Exemple simple (à adapter si besoin de rouge/vert ici aussi)
                 taches = ["Désinfection effectuée", "Matériel rangé"]
                 checked = [t for t in taches if st.checkbox(t)]
-                # Pour les simples, on considère NOK ce qui n'est pas coché
                 unchecked = [t for t in taches if t not in checked]
 
                 obs = st.text_input("Observation")
@@ -447,8 +456,6 @@ def main_app():
 
                         # AFFICHAGE VERT / ROUGE
                         with st.expander("Voir détails Conformité"):
-                            # Anciennes données (avant modif) : 'taches'
-                            # Nouvelles données : 'taches_ok' et 'taches_nok'
                             t_ok = item.get("taches_ok", item.get("taches", ""))
                             t_nok = item.get("taches_nok", "")
 
