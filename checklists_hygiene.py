@@ -290,7 +290,7 @@ def main_app():
 
             rooms_status = st.session_state["current_rooms_status"]
 
-            st.warning("⚠️ Merci de cocher l'état de chaque élément (Oui/Non/NA).")
+            st.warning("⚠️ Merci de cocher l'état de chaque élément (Oui/Non/Non Applicable).")
 
             # Barre de progression simplifiée
             st.write("Progression :")
