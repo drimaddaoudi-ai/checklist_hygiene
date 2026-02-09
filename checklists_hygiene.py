@@ -3,6 +3,7 @@ import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime, timedelta, timezone
+import json  # <--- AJOUT NÉCESSAIRE POUR LIRE LES SECRETS
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Checklist Hygiène", page_icon="🏥", layout="centered")
@@ -60,16 +61,26 @@ CHECKLIST_ITEMS_LAVABO = [
     "Papiers essuie-main disponibles"
 ]
 
-# --- CONNEXION FIREBASE ---
+# --- CONNEXION FIREBASE (CORRIGÉE POUR LE CLOUD) ---
 @st.cache_resource
 def get_db():
     if not firebase_admin._apps:
         try:
-            cred = credentials.Certificate("serviceAccountKey.json")
-            firebase_admin.initialize_app(cred)
-        except FileNotFoundError:
-            st.error("⚠️ Fichier 'serviceAccountKey.json' introuvable !")
+            # 1. Essayer de charger depuis les SECRETS Streamlit (Cloud)
+            if "textkey" in st.secrets:
+                key_dict = json.loads(st.secrets["textkey"])
+                cred = credentials.Certificate(key_dict)
+                firebase_admin.initialize_app(cred)
+            
+            # 2. Sinon, essayer de charger le fichier LOCAL (PC)
+            else:
+                cred = credentials.Certificate("serviceAccountKey.json")
+                firebase_admin.initialize_app(cred)
+                
+        except Exception as e:
+            st.error(f"Erreur de connexion Firebase : {e}")
             st.stop()
+            
     return firestore.client()
 
 try:
