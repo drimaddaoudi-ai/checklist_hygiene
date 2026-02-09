@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, time
 import json
 
 # --- CONFIGURATION ---
@@ -66,21 +66,16 @@ CHECKLIST_ITEMS_LAVABO = [
 def get_db():
     if not firebase_admin._apps:
         try:
-            # 1. Essayer de charger depuis les SECRETS Streamlit (Cloud)
             if "textkey" in st.secrets:
                 key_dict = json.loads(st.secrets["textkey"])
                 cred = credentials.Certificate(key_dict)
                 firebase_admin.initialize_app(cred)
-            
-            # 2. Sinon, essayer de charger le fichier LOCAL (PC)
             else:
                 cred = credentials.Certificate("serviceAccountKey.json")
                 firebase_admin.initialize_app(cred)
-                
         except Exception as e:
             st.error(f"Erreur de connexion Firebase : {e}")
             st.stop()
-            
     return firestore.client()
 
 try:
@@ -97,8 +92,6 @@ def _get_refresh_token(collection_name: str) -> int:
 def _bump_refresh_token(collection_name: str):
     key = f"_refresh_token_{collection_name}"
     st.session_state[key] = st.session_state.get(key, 0) + 1
-
-    # Invalidation cache local de cette collection
     prefix = f"_cache_{collection_name}_"
     keys_to_delete = [k for k in st.session_state.keys() if k.startswith(prefix)]
     for k in keys_to_delete:
@@ -120,28 +113,20 @@ def can_manage_entry(entry_user, entry_timestamp):
     current_user = st.session_state.get("user")
     if current_user == ADMIN_USER:
         return True
-
     if current_user == entry_user and entry_timestamp:
         try:
-            now = datetime.now(timezone.utc)
-            entry_date = entry_timestamp
-
-            # Protection si timestamp sans tzinfo
-            if getattr(entry_date, "tzinfo", None) is None:
-                entry_date = entry_date.replace(tzinfo=timezone.utc)
-
-            diff = now - entry_date
+            # Gestion basique timezone pour éviter crash
+            now = datetime.now(entry_timestamp.tzinfo) 
+            diff = now - entry_timestamp
             if diff < timedelta(hours=24):
                 return True
         except Exception:
             return False
-
     return False
 
-# --- FONCTIONS CRUD OPTIMISÉES ---
+# --- FONCTIONS CRUD ---
 
 def add_checklist_entry(user, type_checklist, service, salle, taches_ok, taches_nok, obs):
-    """Enregistre les tâches faites ET non faites"""
     now_local = datetime.now()
     date_now = now_local.strftime("%Y-%m-%d")
     heure_now = now_local.strftime("%H:%M:%S")
@@ -153,8 +138,8 @@ def add_checklist_entry(user, type_checklist, service, salle, taches_ok, taches_
         "poste": type_checklist,
         "service": service,
         "salle": salle,
-        "taches_ok": ", ".join(taches_ok),    # Ce qui est validé (Vert)
-        "taches_nok": ", ".join(taches_nok),  # Ce qui n'est pas validé (Rouge)
+        "taches_ok": ", ".join(taches_ok),
+        "taches_nok": ", ".join(taches_nok),
         "nb_taches": len(taches_ok),
         "total_items": len(taches_ok) + len(taches_nok),
         "observation": obs,
@@ -185,19 +170,16 @@ def add_journal_entry(user, message):
         st.error(f"Erreur enregistrement journal : {e}")
 
 def get_data_with_ids(collection_name, limit=20):
-    """
-    OPTIMISATION QUOTA :
-    - cache local (session) avec TTL
-    - invalidation auto après add/delete
-    """
+    """Lecture rapide pour l'affichage (limitée)"""
     ck = _cache_key(collection_name, limit)
-    now_utc = datetime.now(timezone.utc)
+    # Simple timestamp local pour le cache
+    now_ts = datetime.now().timestamp()
     refresh_token = _get_refresh_token(collection_name)
 
     cached = st.session_state.get(ck)
     if cached:
-        age = (now_utc - cached["fetched_at"]).total_seconds()
-        if cached["refresh_token"] == refresh_token and age < CACHE_TTL_SECONDS:
+        # Check TTL
+        if cached["refresh_token"] == refresh_token and (now_ts - cached["fetched_at"]) < CACHE_TTL_SECONDS:
             return cached["data"]
 
     try:
@@ -207,7 +189,6 @@ def get_data_with_ids(collection_name, limit=20):
             .limit(limit)
             .stream()
         )
-
         items = []
         for doc in docs:
             item = doc.to_dict()
@@ -216,13 +197,41 @@ def get_data_with_ids(collection_name, limit=20):
 
         st.session_state[ck] = {
             "data": items,
-            "fetched_at": now_utc,
+            "fetched_at": now_ts,
             "refresh_token": refresh_token
         }
         return items
     except Exception as e:
         st.error(f"Erreur lecture {collection_name} : {e}")
         return []
+
+def export_data_by_date(collection_name, start_date, end_date):
+    """Fonction dédiée à l'exportation massive par date"""
+    try:
+        # Conversion des dates sélectionnées en datetime complet pour la requête
+        # Start: 00:00:00 du jour
+        dt_start = datetime.combine(start_date, time.min)
+        # End: 23:59:59 du jour
+        dt_end = datetime.combine(end_date, time.max)
+        
+        # Requête Firestore
+        docs = (
+            db.collection(collection_name)
+            .where("timestamp", ">=", dt_start)
+            .where("timestamp", "<=", dt_end)
+            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            .stream()
+        )
+        
+        items = []
+        for doc in docs:
+            # On ne garde pas l'ID technique dans l'Excel, juste les données
+            items.append(doc.to_dict())
+            
+        return pd.DataFrame(items)
+    except Exception as e:
+        st.error(f"Erreur lors de l'export : {e}")
+        return pd.DataFrame()
 
 # --- AUTHENTIFICATION ---
 def check_login_db(username, password_input):
@@ -255,7 +264,9 @@ def login():
 def main_app():
     # Sidebar
     st.sidebar.title(f"👤 {st.session_state['user']}")
-    if st.session_state["user"] == ADMIN_USER:
+    is_admin = (st.session_state["user"] == ADMIN_USER)
+    
+    if is_admin:
         st.sidebar.markdown("BADGE: 🛡️ **Super Admin**")
 
     if st.sidebar.button("Déconnexion"):
@@ -274,75 +285,58 @@ def main_app():
             ["Matin", "Après-midi", "Désinfection matériel", "Désinfection respi", "Désinfection salle"]
         )
 
-        # LOGIQUE SECTEURS (Matin / Après-midi)
         if type_checklist in ["Matin", "Après-midi"]:
-
             secteur = st.selectbox("Secteur", ["Réa Enfant", "Réa Femme"], key="secteur_selector")
 
-            # Init Session State
             if "current_rooms_status" not in st.session_state or st.session_state.get("current_sector_name") != secteur:
                 st.session_state["current_sector_name"] = secteur
                 if secteur == "Réa Enfant":
                     items_to_check = ROOMS_ENFANT + ["Hall", "Lavabo 1", "Lavabo 2"]
-                else:  # Réa Femme
+                else:
                     items_to_check = ROOMS_FEMME + ["Hall", "Lavabo 3", "Lavabo 4"]
                 st.session_state["current_rooms_status"] = {item: False for item in items_to_check}
 
             rooms_status = st.session_state["current_rooms_status"]
+            st.warning("⚠️ Merci de cocher l'état de chaque élément dans la salle (Oui/Non/Non Applicable).")
 
-            st.warning("⚠️ Merci de cocher l'état de chaque élément (Oui/Non/N/A).")
-
-            # Barre de progression simplifiée
             st.write("Progression :")
             cols = st.columns(len(rooms_status))
             for i, (room_name, is_done) in enumerate(rooms_status.items()):
                 with cols[i]:
                     color = "✅" if is_done else "⏳"
                     st.caption(f"{color} {room_name}")
-
             st.divider()
 
-            # Sélection Zone
             salle_active = st.radio("Zone à contrôler :", list(rooms_status.keys()), horizontal=True)
 
             if rooms_status[salle_active]:
                 st.success(f"✅ Checklist validée pour **{salle_active}**.")
             else:
                 st.markdown(f"### 🩺 Contrôle : {salle_active}")
-
-                # --- LOGIQUE DE CALCUL DES ITEMS ---
                 theoretical_items = []
-
-                # 1. Gestion Isolement (Hors Form)
                 isolement_active = False
+                
                 if salle_active.startswith("Salle"):
                     if st.checkbox("⚠️ Salle en isolement ?", key=f"iso_{salle_active}"):
                         isolement_active = True
 
-                # 2. Construction de la liste théorique
                 if salle_active.startswith("Salle"):
                     theoretical_items = list(CHECKLIST_ITEMS_ROOM)
                     if isolement_active:
                         iso_items_formatted = [f"[ISOLEMENT] {i}" for i in ISOLEMENT_ITEMS]
                         theoretical_items.extend(iso_items_formatted)
-
                 elif salle_active == "Hall":
                     theoretical_items = list(CHECKLIST_ITEMS_HALL)
                 elif salle_active.startswith("Lavabo"):
                     theoretical_items = list(CHECKLIST_ITEMS_LAVABO)
 
-                # --- FORMULAIRE ---
                 with st.form(f"form_{salle_active}"):
-                    
-                    # On prépare les listes pour le stockage
                     current_ok = []
                     current_nok = []
-
                     st.write("**Veuillez renseigner chaque point :**")
 
                     for idx, item in enumerate(theoretical_items):
                         st.markdown(f"**{item}**")
-                        # Boutons Radio : Oui / Non / N/A
                         choice = st.radio(
                             label=f"Choix pour {item}",
                             options=["Oui", "Non", "N/A"],
@@ -351,18 +345,15 @@ def main_app():
                             label_visibility="collapsed",
                             index=None 
                         )
-                        
-                        # Logique de tri
                         if choice == "Oui":
                             current_ok.append(item)
                         elif choice == "N/A":
-                            current_ok.append(f"{item} (N/A)") # Compté comme Validé
+                            current_ok.append(f"{item} (N/A)")
                         elif choice == "Non":
-                            current_nok.append(item) # Compté comme Non Validé
+                            current_nok.append(item)
                         else:
                             current_nok.append(f"{item} (Non renseigné)")
 
-                    # Cas spécial : Si salle et PAS isolement, note auto
                     if salle_active.startswith("Salle") and not isolement_active:
                         current_ok.append("Pas d'isolement (Auto)")
 
@@ -370,8 +361,6 @@ def main_app():
                     obs_salle = st.text_input("Observation (Optionnel)")
 
                     if st.form_submit_button(f"Valider {salle_active}", type="primary"):
-
-                        # Sauvegarde
                         add_checklist_entry(
                             user=st.session_state["user"],
                             type_checklist=type_checklist,
@@ -381,11 +370,9 @@ def main_app():
                             taches_nok=current_nok,
                             obs=obs_salle
                         )
-
                         st.session_state["current_rooms_status"][salle_active] = True
                         st.rerun()
 
-            # Fin du secteur
             if all(rooms_status.values()):
                 st.balloons()
                 st.success(f"🎉 Secteur {secteur} terminé !")
@@ -394,13 +381,11 @@ def main_app():
                     st.rerun()
 
         else:
-            # Autres checklists simples
             st.info("Checklist standard")
             with st.form("simple_check"):
                 taches = ["Désinfection effectuée", "Matériel rangé"]
                 checked = [t for t in taches if st.checkbox(t)]
                 unchecked = [t for t in taches if t not in checked]
-
                 obs = st.text_input("Observation")
                 if st.form_submit_button("Valider"):
                     add_checklist_entry(st.session_state["user"], type_checklist, "Autre", "N/A", checked, unchecked, obs)
@@ -421,27 +406,69 @@ def main_app():
         for item in items:
             st.info(f"**{item.get('user')}** ({item.get('date')} {item.get('heure')}):\n\n{item.get('message')}")
 
-    # --- 3. GESTION ---
+    # --- 3. GESTION & EXPORT ---
     elif menu == "⚙️ Gestion & Historique":
         st.header("Historique & Gestion")
 
         tab_check, tab_journ = st.tabs(["📋 Checklists", "📒 Journal"])
 
+        # --- ONGLET CHECKLISTS ---
         with tab_check:
+            st.subheader("📂 Exportation des données")
+            
+            # MODULE D'EXPORTATION CONDITIONNEL
+            if is_admin:
+                with st.expander("🛠️ Zone Admin : Export complet", expanded=True):
+                    c1, c2 = st.columns(2)
+                    d_start = c1.date_input("Date début", value=datetime.now())
+                    d_end = c2.date_input("Date fin", value=datetime.now())
+                    
+                    if st.button("Rechercher et Préparer le téléchargement"):
+                        with st.spinner("Récupération des données depuis le Cloud..."):
+                            df_admin = export_data_by_date("checklists", d_start, d_end)
+                            if not df_admin.empty:
+                                # Nettoyage des colonnes inutiles pour l'export
+                                cols_to_drop = ['timestamp']
+                                df_admin = df_admin.drop(columns=[c for c in cols_to_drop if c in df_admin.columns], errors='ignore')
+                                
+                                st.success(f"{len(df_admin)} fiches trouvées.")
+                                fname = f"checklists_{d_start}_{d_end}.csv"
+                                st.download_button(
+                                    "📥 Télécharger le fichier CSV",
+                                    df_admin.to_csv(index=False).encode("utf-8-sig"),
+                                    fname,
+                                    "text/csv"
+                                )
+                            else:
+                                st.warning("Aucune donnée sur cette période.")
+            else:
+                # Utilisateur Standard
+                st.info("Vous pouvez télécharger les données des dernières 48h.")
+                if st.button("📥 Télécharger (48h)"):
+                    with st.spinner("Chargement..."):
+                        # On prend large : aujourd'hui et hier
+                        now = datetime.now()
+                        start_48 = now - timedelta(days=2)
+                        df_user = export_data_by_date("checklists", start_48, now)
+                        
+                        if not df_user.empty:
+                            cols_to_drop = ['timestamp']
+                            df_user = df_user.drop(columns=[c for c in cols_to_drop if c in df_user.columns], errors='ignore')
+                            
+                            st.download_button(
+                                "📥 Cliquer pour sauvegarder le CSV",
+                                df_user.to_csv(index=False).encode("utf-8-sig"),
+                                "checklists_48h.csv",
+                                "text/csv"
+                            )
+                        else:
+                            st.warning("Pas de données récentes.")
+
+            st.divider()
+            st.subheader("Aperçu en direct (50 derniers)")
+            
+            # Affichage "Léger" pour consultation rapide
             items_c = get_data_with_ids("checklists", limit=LIMIT_HISTORY)
-
-            if items_c:
-                df_export = pd.DataFrame(items_c).drop(columns=["id", "timestamp"], errors="ignore")
-                # --- CORRECTION ENCODAGE EXCEL ICI ---
-                st.download_button(
-                    "📥 Télécharger (50 derniers)",
-                    df_export.to_csv(index=False).encode("utf-8-sig"), # <--- ICI
-                    "checklists.csv",
-                    "text/csv"
-                )
-
-            st.caption("Affichage des 50 dernières fiches.")
-
             for item in items_c:
                 with st.container(border=True):
                     c1, c2 = st.columns([4, 1])
@@ -453,14 +480,12 @@ def main_app():
                         if item.get("observation"):
                             st.warning(f"📝 Note : {item.get('observation')}")
 
-                        # AFFICHAGE VERT / ROUGE
                         with st.expander("Voir détails Conformité"):
                             t_ok = item.get("taches_ok", item.get("taches", ""))
                             t_nok = item.get("taches_nok", "")
 
                             if t_ok:
                                 st.success(f"✅ **Validé :**\n\n{t_ok}")
-
                             if t_nok:
                                 st.error(f"❌ **NON Validé / Manquant :**\n\n{t_nok}")
                             elif not t_ok and not t_nok:
@@ -475,17 +500,15 @@ def main_app():
                         else:
                             st.caption("🔒")
 
+        # --- ONGLET JOURNAL ---
         with tab_journ:
+            st.subheader("Journal de transmission")
             items_j = get_data_with_ids("journal", limit=LIMIT_HISTORY)
+            
+            # Bouton simple pour le journal (souvent moins volumineux)
             if items_j:
-                df_export_j = pd.DataFrame(items_j).drop(columns=["id", "timestamp"], errors="ignore")
-                # --- CORRECTION ENCODAGE EXCEL ICI ---
-                st.download_button(
-                    "📥 Télécharger Journal",
-                    df_export_j.to_csv(index=False).encode("utf-8-sig"), # <--- ICI
-                    "journal.csv",
-                    "text/csv"
-                )
+                df_j = pd.DataFrame(items_j).drop(columns=["id", "timestamp"], errors="ignore")
+                st.download_button("📥 Télécharger Journal (50 derniers)", df_j.to_csv(index=False).encode("utf-8-sig"), "journal.csv", "text/csv")
 
             for item in items_j:
                 with st.container(border=True):
